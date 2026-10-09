@@ -8,8 +8,10 @@ const port = process.env.PORT || 3000;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 const LAYLA_SECRET = process.env.LAYLA_SECRET || 'layla123';
 
-// نظام المصادقة
+// نظام المصادقة المعدل (يسمح بفتح الاتصال، ويطلب الباسورد للأوامر فقط)
 app.use((req, res, next) => {
+  if (req.method === 'GET') return next(); 
+
   const authHeader = req.headers.authorization;
   if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
     return res.status(401).send('Unauthorized: You are not Layla!');
@@ -17,13 +19,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// إنشاء خادم MCP
 const server = new Server(
   { name: 'layla-brave-search', version: '1.0.0' },
   { capabilities: { tools: {} } }
 );
 
-// تعريف أداة البحث
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [{
     name: 'brave_web_search',
@@ -36,7 +36,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   }]
 }));
 
-// تنفيذ البحث
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === 'brave_web_search') {
     const query = request.params.arguments.query;
@@ -55,14 +54,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error('Tool not found');
 });
 
-// ربط MCP - (الجزء اللي اتعدل عشان يرضي تطبيق Layla)
 let transport;
 app.get('/sse', async (req, res) => {
-  transport = new SSEServerTransport('/sse', res); 
+  transport = new SSEServerTransport('/sse', res);
   await server.connect(transport);
 });
 
-app.post('/sse', express.json(), async (req, res) => { 
+app.post('/sse', express.json(), async (req, res) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
@@ -71,3 +69,4 @@ app.post('/sse', express.json(), async (req, res) => {
 });
 
 app.listen(port, () => console.log(`Layla MCP Server running on port ${port}`));
+

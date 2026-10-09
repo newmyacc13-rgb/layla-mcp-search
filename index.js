@@ -1,8 +1,9 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -78,13 +79,32 @@ function createMcpServer() {
 // ---------- Health check ----------
 app.get('/', (req, res) => res.send('MCP server is running'));
 
-// ---------- 1) Streamable HTTP (الحديث) — ده اللي تطبيق Layla بيستخدمه: POST على /sse ----------
+// ---------- 1) Streamable HTTP (الحديث) — Layla بتبعت POST على /sse وبتطلب Mcp-Session-Id ----------
+const httpSessions = new Map(); // sessionId -> transport
+
 async function handleStreamable(req, res) {
-  const server = createMcpServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); // stateless
-  res.on('close', () => { transport.close(); server.close(); });
   try {
-    await server.connect(transport);
+    const sid = req.headers['mcp-session-id'];
+    let transport = sid ? httpSessions.get(sid) : undefined;
+
+    if (!transport) {
+      if (sid || !isInitializeRequest(req.body)) {
+        // جلسة غير معروفة (مثلاً السيرفر عمل restart) -> 404 عشان العميل يبدأ جلسة جديدة
+        return res.status(sid ? 404 : 400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: sid ? 'Session not found' : 'Bad Request: no session' },
+          id: null
+        });
+      }
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => { httpSessions.set(id, transport); }
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) httpSessions.delete(transport.sessionId);
+      };
+      await createMcpServer().connect(transport);
+    }
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
     console.error('Streamable error:', err);
@@ -93,12 +113,22 @@ async function handleStreamable(req, res) {
     }
   }
 }
+
+async function handleSessionRequest(req, res) {
+  const transport = httpSessions.get(req.headers['mcp-session-id']);
+  if (!transport) return res.status(404).send('Session not found');
+  await transport.handleRequest(req, res);
+}
+
 app.post(['/sse', '/mcp'], auth, express.json(), handleStreamable);
+app.get('/mcp', auth, handleSessionRequest);
+app.delete(['/sse', '/mcp'], auth, handleSessionRequest);
 
 // ---------- 2) SSE القديم (للتوافق) ----------
 const sseTransports = new Map(); // sessionId -> transport
 
 app.get('/sse', auth, async (req, res) => {
+  if (req.headers['mcp-session-id']) return handleSessionRequest(req, res);
   const transport = new SSEServerTransport('/messages', res);
   sseTransports.set(transport.sessionId, transport);
   res.on('close', () => sseTransports.delete(transport.sessionId));
@@ -111,8 +141,5 @@ app.post('/messages', auth, async (req, res) => {
   if (!transport) return res.status(400).send('No transport found for sessionId');
   await transport.handlePostMessage(req, res); // مهم: من غير express.json هنا
 });
-
-// /mcp لا يدعم GET/DELETE في الوضع stateless
-app.all('/mcp', (req, res) => res.status(405).set('Allow', 'POST').send('Method not allowed'));
 
 app.listen(port, () => console.log(`Server running on port ${port}`));

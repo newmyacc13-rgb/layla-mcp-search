@@ -6,12 +6,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 const app = express();
 const port = process.env.PORT || 3000;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
-const LAYLA_SECRET = process.env.LAYLA_SECRET || 'Lovely333';
 
-// السماح بالاتصال من التطبيق بدون قيود
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', '*');
   res.header('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -51,40 +49,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error('Tool not found');
 });
 
-let globalTransport = null;
+let transport;
 
-// استقبال الاتصال المبدئي
+// المسار الأول: فتح الاتصال
 app.get('/sse', async (req, res) => {
-  globalTransport = new SSEServerTransport('/sse', res);
-  await server.connect(globalTransport);
-  
-  req.on('close', () => {
-    globalTransport = null; // تنظيف الذاكرة لو التطبيق قفل
-  });
+  // السيرفر بيبلغ التطبيق إنه يبعت الأوامر على مسار /messages
+  transport = new SSEServerTransport('/messages', res);
+  await server.connect(transport);
 });
 
-// استقبال أوامر البحث
-app.post('/sse', async (req, res) => {
+// المسار الثاني: استقبال الأوامر 
+app.post('/messages', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
+  if (authHeader !== 'Bearer Lovely333') {
     return res.status(401).send('Unauthorized');
   }
-
-  // لو Layla بعتت الأمر بدون اتصال جديد، نطلب منها المحاولة تاني
-  if (!globalTransport) {
-    return res.status(503).send('Connection not ready. Please restart Layla app.');
+  
+  if (!transport) {
+    return res.status(400).send('Connection not ready');
   }
-
-  try {
-    await globalTransport.handlePostMessage(req, res);
-  } catch (error) {
-    console.error('Message error:', error);
-  }
+  
+  await transport.handlePostMessage(req, res);
 });
 
-// رسالة ترحيبية للمتصفح عشان تتأكد إنه شغال
-app.get('/', (req, res) => {
-  res.send('<h2 style="color: green; text-align: center; margin-top: 50px;">✅ السيرفر يعمل بنجاح! ارجع لتطبيق Layla</h2>');
-});
-
-app.listen(port, () => console.log(`Layla MCP Server running on port ${port}`));
+app.listen(port, () => console.log(`Server running on port ${port}`));

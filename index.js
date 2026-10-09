@@ -8,7 +8,7 @@ const port = process.env.PORT || 3000;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 const LAYLA_SECRET = process.env.LAYLA_SECRET || 'layla123';
 
-// 1. السماح بمرور طلبات الفحص المخفية (CORS) اللي التطبيق بيعملها
+// 1. السماح بالاتصالات بدون قيود
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -51,25 +51,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error('Tool not found');
 });
 
-let globalTransport;
+// نظام الجلسات المتعددة لتفادي سقوط السيرفر
+const transports = new Map();
 
-// 2. استقبال الاتصال المبدئي لفتح القناة بدون قيود
-app.get('/sse', async (req, res) => {
-  globalTransport = new SSEServerTransport('/message', res);
-  await server.connect(globalTransport);
+// 2. إنشاء قناة الاتصال وإرسال الرابط الكامل للتطبيق
+app.get(['/', '/sse'], async (req, res) => {
+  try {
+    const sessionId = Math.random().toString(36).substring(7);
+    const host = req.get('host');
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    
+    // إجبار التطبيق على استخدام مسار صريح وكامل
+    const endpoint = `${protocol}://${host}/message?sessionId=${sessionId}`;
+    
+    const transport = new SSEServerTransport(endpoint, res);
+    transports.set(sessionId, transport);
+    
+    await server.connect(transport);
+    
+    res.on('close', () => {
+      transports.delete(sessionId);
+    });
+  } catch (error) {
+    console.error('SSE connection error:', error);
+  }
 });
 
-// 3. استقبال الأوامر على أي مسار يختاره التطبيق مع فحص الباسورد هنا فقط
-app.post(['/sse', '/message'], express.json({ type: '*/*' }), async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
-    return res.status(401).send('Unauthorized');
-  }
+// 3. استقبال الأوامر (بدون express.json عشان السيرفر ميعملش ريستارت)
+app.post(['/message', '/sse'], async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
+      return res.status(401).send('Unauthorized');
+    }
 
-  if (!globalTransport) {
-    return res.status(400).send('Connection not ready');
+    const sessionId = req.query.sessionId;
+    let transport = transports.get(sessionId);
+
+    // خطة بديلة لو التطبيق اتلخبط في الرابط
+    if (!transport && transports.size === 1) {
+      transport = Array.from(transports.values())[0];
+    }
+
+    if (!transport) {
+      return res.status(400).send('Connection not ready. Try Discover Tools again.');
+    }
+
+    await transport.handlePostMessage(req, res);
+  } catch (error) {
+    console.error('Message error:', error);
+    res.status(500).send('Internal Error');
   }
-  await globalTransport.handlePostMessage(req, res);
 });
 
 app.listen(port, () => console.log(`Layla MCP Server running on port ${port}`));

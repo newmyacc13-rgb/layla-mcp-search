@@ -8,14 +8,12 @@ const port = process.env.PORT || 3000;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 const LAYLA_SECRET = process.env.LAYLA_SECRET || 'layla123';
 
-// نظام المصادقة المعدل (يسمح بفتح الاتصال، ويطلب الباسورد للأوامر فقط)
+// 1. السماح بمرور طلبات الفحص المخفية (CORS) اللي التطبيق بيعملها
 app.use((req, res, next) => {
-  if (req.method === 'GET') return next(); 
-
-  const authHeader = req.headers.authorization;
-  if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
-    return res.status(401).send('Unauthorized: You are not Layla!');
-  }
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', '*');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
@@ -38,9 +36,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === 'brave_web_search') {
-    const query = request.params.arguments.query;
     try {
-      const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`, {
+      const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(request.params.arguments.query)}`, {
         headers: { 'Accept': 'application/json', 'X-Subscription-Token': BRAVE_API_KEY }
       });
       if (!res.ok) throw new Error(`Brave API error: ${res.status}`);
@@ -54,19 +51,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error('Tool not found');
 });
 
-let transport;
+let globalTransport;
+
+// 2. استقبال الاتصال المبدئي لفتح القناة بدون قيود
 app.get('/sse', async (req, res) => {
-  transport = new SSEServerTransport('/sse', res);
-  await server.connect(transport);
+  globalTransport = new SSEServerTransport('/message', res);
+  await server.connect(globalTransport);
 });
 
-app.post('/sse', express.json(), async (req, res) => {
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send('Connection not ready');
+// 3. استقبال الأوامر على أي مسار يختاره التطبيق مع فحص الباسورد هنا فقط
+app.post(['/sse', '/message'], express.json({ type: '*/*' }), async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
+    return res.status(401).send('Unauthorized');
   }
+
+  if (!globalTransport) {
+    return res.status(400).send('Connection not ready');
+  }
+  await globalTransport.handlePostMessage(req, res);
 });
 
 app.listen(port, () => console.log(`Layla MCP Server running on port ${port}`));
-

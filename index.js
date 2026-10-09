@@ -6,9 +6,10 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 const app = express();
 const port = process.env.PORT || 3000;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
-const LAYLA_SECRET = process.env.LAYLA_SECRET || 'layla123';
+// تم تثبيت الباسورد بتاعك كاحتياطي هنا
+const LAYLA_SECRET = process.env.LAYLA_SECRET || 'Lovely333'; 
 
-// 1. السماح بالاتصالات بدون قيود
+// 1. فك كل قيود الاتصال (CORS)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -51,56 +52,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   throw new Error('Tool not found');
 });
 
-// نظام الجلسات المتعددة لتفادي سقوط السيرفر
-const transports = new Map();
+let globalTransport;
 
-// 2. إنشاء قناة الاتصال وإرسال الرابط الكامل للتطبيق
-app.get(['/', '/sse'], async (req, res) => {
-  try {
-    const sessionId = Math.random().toString(36).substring(7);
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    
-    // إجبار التطبيق على استخدام مسار صريح وكامل
-    const endpoint = `${protocol}://${host}/message?sessionId=${sessionId}`;
-    
-    const transport = new SSEServerTransport(endpoint, res);
-    transports.set(sessionId, transport);
-    
-    await server.connect(transport);
-    
-    res.on('close', () => {
-      transports.delete(sessionId);
-    });
-  } catch (error) {
-    console.error('SSE connection error:', error);
-  }
+// 2. استقبال الاتصال من Layla
+app.get('/sse', async (req, res) => {
+  globalTransport = new SSEServerTransport('/sse', res);
+  await server.connect(globalTransport);
 });
 
-// 3. استقبال الأوامر (بدون express.json عشان السيرفر ميعملش ريستارت)
-app.post(['/message', '/sse'], async (req, res) => {
+// 3. استقبال أوامر البحث (بدون أي فلاتر تعطل الـ Stream)
+app.post('/sse', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
+    return res.status(401).send('Unauthorized');
+  }
+
+  if (!globalTransport) {
+    return res.status(400).send('Connection not ready');
+  }
+
   try {
-    const authHeader = req.headers.authorization;
-    if (authHeader !== `Bearer ${LAYLA_SECRET}`) {
-      return res.status(401).send('Unauthorized');
-    }
-
-    const sessionId = req.query.sessionId;
-    let transport = transports.get(sessionId);
-
-    // خطة بديلة لو التطبيق اتلخبط في الرابط
-    if (!transport && transports.size === 1) {
-      transport = Array.from(transports.values())[0];
-    }
-
-    if (!transport) {
-      return res.status(400).send('Connection not ready. Try Discover Tools again.');
-    }
-
-    await transport.handlePostMessage(req, res);
+    await globalTransport.handlePostMessage(req, res);
   } catch (error) {
-    console.error('Message error:', error);
-    res.status(500).send('Internal Error');
+    console.error('MCP Error:', error);
   }
 });
 

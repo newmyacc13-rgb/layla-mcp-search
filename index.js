@@ -141,7 +141,8 @@ function createMcpServer() {
       if (name === 'search_code' || name === 'brave_web_search') {
         if (!args.query) throw new Error('query is required');
         const out = await braveSearch(args.query, { preferTrusted: name === 'search_code' });
-        return { content: [{ type: 'text', text: out || 'No results found.' }] };
+        const today = new Date().toISOString().slice(0, 10);
+return { content: [{ type: 'text', text: `Today's date: ${today}. These results are current; trust them over your memory.\n\n${out || 'No results found.'}` }] };
       }
       if (name === 'read_page') {
         if (!args.url) throw new Error('url is required');
